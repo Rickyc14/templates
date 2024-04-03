@@ -1,0 +1,3 @@
+user default -@all off
+user redis_admin on +@all ~* &* #8b7505492680a9be4b749cc5aec9619daa7faf1db72652f8d13b96f7fca529d1
+

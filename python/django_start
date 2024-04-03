@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+
+postgres_is_ready() {
+python << END
+import sys
+import psycopg2
+
+try:
+    psycopg2.connect(
+        dbname="${POSTGRES_DB}",
+        user="${POSTGRES_USER}",
+        password="${POSTGRES_PASSWORD}",
+        host="${POSTGRES_HOST}",
+        port="${POSTGRES_PORT}",
+    )
+except psycopg2.OperationalError:
+    sys.exit(-1)
+sys.exit(0)
+END
+}
+
+max_attempts=5
+for ((attempt = 1 ; attempt <= max_attempts ; attempt++ )); do
+    if postgres_is_ready; then
+        >&2 echo "PostgreSQL is available"
+        break
+    elif (( attempt == max_attempts)); then
+        >&2 echo "Could not connect to PostgreSQL. Exiting now."
+        exit 1
+    else
+        >&2 echo "Waiting for PostgreSQL to become available. Attempt ${attempt} of ${max_attempts}."
+        sleep 2
+    fi
+done
+
+if [ "${DJANGO_SETTINGS_MODULE}" = "config.settings.local" ]; then
+    echo "Creating migrations..."
+    python manage.py makemigrations --no-input
+    echo "Created!"
+fi
+
+echo "Migrating models..."
+python manage.py migrate --no-input
+echo "Migrated!"
+
+if [ "${DJANGO_SETTINGS_MODULE}" = "config.settings.local" ]; then
+    echo "Loading fixtures..."
+    python manage.py loaddata example_fixtures
+    echo "Fixtures loaded!"
+fi
+
+if [ "${DJANGO_SETTINGS_MODULE}" = "config.settings.production" ]; then
+    echo "Inspecting Django project for common problems..."
+    python manage.py check --deploy
+
+    echo "Collecting statics..."
+    python manage.py collectstatic --noinput --verbosity 0
+    echo "Collected"
+
+    echo "Starting Supervisor ..."
+    exec supervisord --configuration "/home/django/production.conf"
+
+elif [ "${DJANGO_SETTINGS_MODULE}" = "config.settings.local" ]; then
+    # Start local server with 'exec'. Using 'exec' here is important
+    # because it runs the subsequent command ('python manage.py ...')
+    # in the same process (same PID) as this script. In other words,
+    # no new process is created, avoiding an extra process fork and
+    # preventing a shell instance lying around in memory. This very
+    # important when running inside a container. It maintains the
+    # correct parent/child relationship between processes, which is
+    # crucial for sending signals. Without 'exec', sending SIGINT(2)
+    # (CTRL + C) would cause the container to stop with exit code 137,
+    # meaning a SIGKILL(9) killed it, which is not good. However, when
+    # using 'exec', the container stops properly with exit code 0.
+
+    # If not running with supervisor
+    # exec python manage.py runserver 0.0.0.0:8000
+
+    echo "Starting Supervisor ..."
+    exec supervisord --configuration "/home/django/local.conf"
+
+else
+    echo "DJANGO_SETTINGS_MODULE is not valid." >&2
+    exit 1
+fi
+
